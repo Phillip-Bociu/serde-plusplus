@@ -1,18 +1,51 @@
 #pragma once
 #include <type_traits>
 #include <cstdint>
-
-void* __cdecl memcpy(void* dst, void const* src, size_t size);
+#include <string.h>
 
 #if defined(_MSC_VER)
 #define FORCE_INLINE __forceinline
 #else
-#define FORCE_INLINE __attribute__((always_inline))
+#define FORCE_INLINE __attribute__((always_inline)) inline
 #endif
 
 /*======================================
                 Interface
  ======================================*/
+
+ 
+namespace detail {
+  // Needed for some older versions of GCC
+  template<typename...>
+    struct voider { using type = void; };
+
+  // std::void_t will be part of C++17, but until then define it ourselves:
+  template<typename... T>
+    using void_t = typename voider<T...>::type;
+
+  template<typename T, typename U = void>
+    struct is_mappish_impl : std::false_type { };
+
+  template<typename T>
+    struct is_mappish_impl<T, void_t<typename T::key_type,
+                                     typename T::mapped_type,
+                                     decltype(std::declval<T&>()[std::declval<const typename T::key_type&>()])>>
+    : std::true_type { };
+
+  template<typename T, typename U = void>
+    struct is_keyish_impl : std::false_type { };
+
+  template<typename T>
+    struct is_keyish_impl<T, void_t<typename T::key_type,
+                                     decltype(std::declval<T&>()[std::declval<const typename T::key_type&>()])>>
+    : std::true_type { };
+}
+
+template<typename T>
+struct is_mappish : detail::is_mappish_impl<T>::type { };
+
+template<typename T>
+struct is_keyish : detail::is_keyish_impl<T>::type { };
 
 namespace serdepp {
     // blob: indexable container of bytes
@@ -167,6 +200,23 @@ namespace serdepp {
             if constexpr(std::is_trivially_copyable_v<T>) {
                 memcpy(&object, &bytes[position], sizeof(T));
                 position += sizeof(T);
+            } else if constexpr (is_keyish<T>{}) {
+                using value_t = decltype(T{}[0]);
+                std::uint64_t size;
+                deserialize_one(bytes, size);
+
+                object.clear();
+                for(std::uint64_t i = 0; i < size; i++) {
+                    typename T::key_type key;
+                    deserialize_one(bytes, key);
+                    if constexpr (is_mappish<T>{}) {
+                        typename T::mapped_type value;
+                        deserialize_one(bytes, value);
+                        object[key] = value;
+                    } else {
+                        object.insert(key);
+                    }
+                }
             } else if constexpr (requires { T{}[0]; }){
                 using value_t = decltype(T{}[0]);
                 std::uint64_t size;
@@ -201,6 +251,21 @@ namespace serdepp {
                     memcpy(&output[position], &object, sizeof(T));
                 }
                 position += sizeof(T);
+            } else if constexpr (is_keyish<T>{}) {
+                using value_t = decltype(T{}[0]);
+                std::uint64_t size = object.size();
+                serialize_one(output, size);
+
+                if constexpr (is_mappish<T>{}) {
+                    for(const auto& [key, val] : object) {
+                        serialize_one(output, key);
+                        serialize_one(output, val);
+                    }
+                } else {
+                    for(const auto& key : object) {
+                        serialize_one(output, key);
+                    }
+                }
             } else if constexpr (requires { T{}[0]; }){
                 using value_t = decltype(T{}[0]);
                 const std::uint64_t size = object.size();
@@ -270,4 +335,3 @@ namespace serdepp {
         }
 }
 #undef FORCE_INLINE
-
